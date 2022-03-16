@@ -1,0 +1,480 @@
+---
+title: "P10_Détectez_des_faux_billets"
+author: "Shibin_YANG"
+output: 
+  html_document:
+    theme: cerulean
+    toc: true
+---
+
+# 1 - Importation des données
+
+```{r}
+data <- read.table("Desktop/Openclassrooms/P10_Shibin_YANG/billets.csv", sep = ";", dec = ".", header=TRUE)
+data [1:5, ]
+```
+
+```{r}
+summary(data)
+```
+
+Il s'agit des données qui comptent `r nrow(data)` lignes et `r ncol(data)` colonnes, la colonne is_genuine disctingue les vrais et faux billets, et les 6 autres colonnes représentent les 6 variables. Nous pouvons observer qu'il y a `r sum(is.na(data$margin_low))` valeurs manquantes dans la colonne 'margin_low'.
+
+```{r}
+subset(data,is.na(margin_low))
+```
+
+# 2 - Nettoyage des données
+
+##  2.1 - Vérification de corrélation entre les variables
+
+```{r}
+correlation = cor(data[,2:7], use = "pairwise.complete.obs")
+correlation
+```
+```{r,message = FALSE}
+library(corrplot)
+corrplot(correlation, method="color", addCoef.col = 'grey50')
+```
+
+On fait d'abord vérifier s'il y a des corrélations entre les variables, s'il y en a, on peut appliquer la méthode de régression linéaire multivarié, afin pour remplacer les valeurs manquantes. On peut voir qu'il y a un peu de corrélation entre les variables, mais pas assez forte. On va quand même essayer avec le modèle de régression linéaire multivarié pour voir qu'est ce que cela donne.
+
+## 2.2 - Création du modèle régression linéaire multivarié
+
+On va d'abord séparer les données en données d'entrainement et de test, une fois le modèle prédit bien les données de test, on va ensuite utiliser ce modèle pour déterminer les `r sum(is.na(data$margin_low))` valeurs manquantes.
+
+```{r,message = FALSE}
+library(caret)
+set.seed(10)
+data_model = subset(data,!is.na(margin_low))
+trainIndex <- createDataPartition(data_model$margin_low, p = 0.8, list = FALSE, times = 1)
+Xtrain <- data_model[ trainIndex,]
+Xtest  <- data_model[-trainIndex,]
+```
+
+```{r}
+nrow(Xtrain)
+```
+```{r}
+nrow(Xtest)
+```
+
+Nous allons séparer le jeu de données sans les individus qui contiennent des valeurs manquantes, en training set et testing set. J'ai mis la répartition classique 80/20 entre training et testing set, c'est-à-dire que je vais fixer les données d'entrainement à `r nrow(Xtrain)` individus, et les données de test à `r nrow(Xtest)` individus.
+
+```{r}
+reg_margin_low <- lm(margin_low ~ diagonal+height_left+height_right+margin_up+length, data=Xtrain)
+summary(reg_margin_low)
+```
+
+En appliquant le model de régression linéaire, on a un coeffient de détermination à `r round((summary(reg_margin_low)$r.squared)*100,0)` %. Je trouve que le pouvoir de prédire de ce model n'est pas assez forte pour déterminer les valeurs manquantes. On va ajouter la variable 'is_genuine' qui distingue les vrais et faux billets pour vois si ce sera mieux.
+
+```{r}
+reg_margin_low = lm(margin_low ~ is_genuine+diagonal+height_left+height_right+margin_up+length, data=Xtrain)
+summary(reg_margin_low)
+```
+```{r}
+result_test <- predict(reg_margin_low, newdata=Xtest, type='response',interval = "prediction",se.fit = T)
+result_test$residual.scale
+```
+J'essaie d'ajouter la variable 'is_genuine' qui distingue les vrais et faux billets, et refaire le modèle, donc, on a un coeffient de détermination à `r round((summary(reg_margin_low)$r.squared)*100,0)`%, soit une résidu sur les données de test à `r round((result_test$residual.scale)*100,0)`%. C'est beaucoup mieux, même si ce n'est pas très élevé, mais il présente quand même une prédiction assez parlante. On va utiliser ce modèle pour déterminer les `r sum(is.na(data$margin_low))` valeurs manquantes.
+
+## 2.3 - Remplacement des valeurs manquantes
+
+```{r}
+billets = data
+VNan = subset(billets,is.na(margin_low))
+nrow(VNan)
+```
+
+```{r}
+predict(reg_margin_low, newdata=VNan)
+billets[is.na(billets$margin_low),"margin_low"] <- round(predict(reg_margin_low, newdata=VNan),2)
+```
+
+```{r}
+variable = c('diagonal','height_left','height_right','margin_low','margin_up','length')
+moyen = aggregate(x=billets[variable], by=list(is_genuine=billets$is_genuine), mean)
+moyen
+```
+```{r}
+aggregate(billets$is_genuine, by=list(is_genuine=billets$is_genuine), length)
+```
+
+Notre échantillon contient `r sum(!is.na(data$is_genuine))` billets : `r sum(data$is_genuine=='True')` vrais billets et `r sum(data$is_genuine=='False')` faux.
+
+Portrait-robot du vrai billet :
+
+- Hauteur mesurée à gauche : `r round(moyen[2,3],2)` mm,
+
+- Hauteur mesurée à droite :  `r round(moyen[2,4],2)` mm,
+
+- Marge entre le bord supérieur et le bord de l'image :  `r round(moyen[2,6],2)` mm,
+
+- Marge entre le bord inférieur et le bord de l'image :  `r round(moyen[2,5],2)` mm,
+
+- Longueur :  `r round(moyen[2,7],2)` mm,
+
+- Diagonale :  `r round(moyen[2,2],2)` mm.
+
+Parmi les variables, il y a de grand différent pour les varibles 'margin_low' et 'length' entre un vrai et un faux billet.
+
+# 3 - ACP et KMeans
+
+## 3.1 - Analyse ACP
+
+### 3.1.1 - Préparation des données centrées et réduites
+
+```{r}
+library(FactoMineR)
+X_scaled = scale(billets[,2:7])
+res.pca <- PCA(X_scaled, scale.unit=T, ncp=6, graph = FALSE)
+```
+
+```{r,message = FALSE}
+library("factoextra")
+eig.val <- get_eigenvalue(res.pca)
+eig.val
+```
+
+### 3.1.2 - Éboulis des valeurs propres
+
+Cet éboulis indique que l'axe F1 et F2 ont une grande inertie de presque `r round(eig.val[2,3],0)`%. On va s'intéresser aux axes F1 et F2.
+
+```{r}
+fviz_eig(res.pca, addlabels = TRUE)
+```
+
+### 3.1.3 - Cercle de corrélation
+
+* diagonal semble le mieux représenté, très corrélé à la dimension 2
+* les height et margin semblent corrélées entre elles mais faiblement avec la dimension 1
+* je note également une anti corrélation de la length sur la dimension 1
+
+```{r}
+fviz_pca_var(res.pca, col.var = "black")
+```
+
+### 3.1.4 - Projection des individus sur les plans factoriels selon le type de billet
+
+On peut observer que la projection des individus sur le premier plan factoriel, qui distingue plutôt bien les vrai et faux billets.
+
+```{r}
+fviz_pca_ind(res.pca,
+             geom.ind = "point", 
+             col.ind = billets$is_genuine,
+             palette = c("#00AFBB", "#E7B800"),
+             addEllipses = TRUE,
+             ellipse.type = "convex",
+             legend.title = "Type de billet")
+```
+
+## 3.2 - Analyse KMeans
+
+### 3.2.1 - Comparaison de moyen des variables entre clusters et le type de billet
+
+```{r}
+set.seed(123)
+km.res = kmeans(X_scaled, 2, nstart = 10)
+Clusters = km.res$cluster
+```
+
+```{r}
+aggregate(x=billets[variable], by=list(Clusters), mean)
+```
+```{r}
+aggregate(x=billets[variable], by=list(is_genuine=billets$is_genuine), mean)
+```
+Selon ce comparaison de moyen de chaque variable , les groupes créés par KMeans sont très proches de la distinction de vrai et faux billets, donc, cluster 2 correspond à faux billet, et cluster 1 sont de vrai.
+
+### 3.2.2 - Projection des individus sur le premier plan factoriel par clusters
+
+```{r}
+pca_kmeans <- fviz_pca_ind(res.pca, col.ind = factor(Clusters),
+             geom = "point", addEllipses = TRUE,
+             palette = c("#00AFBB", "#E7B800"),
+             ellipse.type = "convex",
+             legend.title = "Clusters")
+pca_kmeans
+```
+
+Visuellement, sur le graphique, les clusters sont aussi très similaire par rapport à la distinction de vrai et faux billets, donc, cluster 2 correspond à faux billet, et cluster 1 est de vrai.
+
+### 3.2.3 - Matrice de confusion Kmeans
+
+```{r}
+kmeans.mat.conf = table(Clusters, billets$is_genuine)
+kmeans.mat.conf
+```
+
+On fait une analyse des nombres de faux via une matrix de confusion, en comparant les deux clusters avec la distinction original des vrais et faux billets. Donc, ici, nous avons `r kmeans.mat.conf[2,2]` vrais billets détectés comme des faux billets (cluster 2), et `r kmeans.mat.conf[1,1]` faux billets détectés comme des vrais billets (cluster 1). On va ensuite ajouter les données de test pour voir si on peut bien détecter des faux billets à l'aide de KMeans.
+
+### 3.2.4 - Tester les billets inconnus
+
+#### 3.2.5.1 - Importer et combiner les données inconnues avec les données d'origine
+
+```{r}
+b_pro = read.table("Desktop/Openclassrooms/P10_Shibin_YANG/billets_production.csv", sep = ",", dec = ".", header=TRUE, row.names = 7)
+b_pro$is_genuine <- NA
+billets_plus = rbind(billets, b_pro)
+tail(billets_plus, n = 10)
+```
+
+#### 3.2.5.2 - Préparation des données de test (centrées et réduites)
+
+```{r}
+sup_scaled = scale(billets_plus[,2:7])
+ind.sup = sup_scaled[1501:1505,]
+ind.sup
+```
+
+```{r}
+ind.sup.pca <- predict(res.pca, newdata = ind.sup)
+ind.sup.pca
+```
+
+#### 3.2.5.3 - Projection des individus d'origine par clusters, et les individus inconnus sur le plan factoriel
+
+```{r}
+fviz_add(pca_kmeans, ind.sup.pca$coord, color = "blue")
+```
+
+On peut quasiment d'être sûr que les billets 'A_1', 'A_2', 'A_3' sont dans le cluster 2, certainement ils sont des faux billets, les billets 'A_4', 'A_5' sont dans le cluster 1, certainement ils sont des vrais billets. On va essayer de chercher pour chaque individu de test, le plus proche de centoid des deux clusters.
+
+#### 3.2.5.4 - Calcul de la distance entre chaque billet inconnu et le centre des clusters et prédiction par Kmeans
+
+```{r}
+km.res$centers
+```
+```{r}
+calc_vec2mat_dist = function(x, ref_mat) {
+    # compute row-wise vector to vector distance 
+    apply(ref_mat, 1, function(r) sum((r - x)^2))
+}
+
+dist_mat = apply(ind.sup, 1, function(r) calc_vec2mat_dist(r, km.res$centers))
+dist_mat
+```
+
+On a donc le résultat, les billets 'A_1', 'A_2', 'A_3' sont des faux billets, car ils sont plus proche du centroid de cluster 2, et les billets 'A_4', 'A_5' sont des vrais, ils sont proche du centroid de cluster 1.
+
+```{r}
+find_clusters <- function(x, centers) {
+  # compute squared euclidean distance from each sample to each cluster center
+  tmp <- sapply(seq_len(nrow(x)),
+                function(i) apply(centers, 1,
+                                  function(v) sum((x[i, ]-v)^2)))
+  max.col(-t(tmp))  # find index of min distance
+}
+
+Centre_data_test = find_clusters(ind.sup, km.res$centers)
+verif_data_test = data.frame(rownames(b_pro),Centre_data_test)
+colnames(verif_data_test) <- c("Billet","Cluster")
+verif_data_test
+```
+
+## 3.3 - Script de modèle de détection Kmeans
+
+On va créer un model pour détecter les billets inconnus, en utilisant la distance minimale entre chaque billets inconnus et les controids des clusters pour réaliser la prédiction.
+
+```{r}
+verif_billets_model_kmeans <- function(csv){
+  bills <- read.table(csv, sep = ",", dec = ".", header=TRUE)
+  id_bills = bills$id
+  bills$is_genuine <- NA
+  billets$id <- NA
+  bills_plus = rbind(billets, bills)
+  test_scaled = scale(bills_plus[variable])
+  bills_val = subset(test_scaled[1501:1505,])
+  dist = apply(bills_val, 1, function(r) calc_vec2mat_dist(r, km.res$centers))
+  predictions = dist[2, ] > dist[1, ]
+  for(i in seq_len(nrow(bills))){
+     print(paste("Billet", id_bills[i], ":", "c'est un vrai billet =",
+            predictions[i]))
+}
+}
+```
+
+```{r}
+verif_billets_model_kmeans("Desktop/Openclassrooms/P10_Shibin_YANG/billets_production.csv")
+```
+
+Pour être sûr de ce résultat, on va encore essayer les autres méthodes.
+
+# 4 - Régression logistique
+
+## 4.1 - Séparation des données d'entraînement et de test
+
+```{r}
+df_reg_log = billets
+# Transformer les données de type caractère "True" et "False" à 1 et 0
+df_reg_log$is_genuine <- ifelse(df_reg_log$is_genuine=="True", 1, 0)
+
+set.seed(0)
+trainIndex <- createDataPartition(df_reg_log$is_genuine, p = 0.8, list = FALSE, times = 1)
+
+XTrain <- df_reg_log[ trainIndex,]
+XTest  <- df_reg_log[-trainIndex,]
+```
+
+```{r}
+nrow(XTrain)
+```
+
+```{r}
+nrow(XTest)
+```
+
+Pour appliquer cette méthode, nous allons séparer le jeu de données en training set et testing set. J'ai mis la répartition classique 80/20 entre training et testing set, c'est-à-dire que je vais fixer les données d'entrainement à `r nrow(XTrain)` individus, et les données de test à `r nrow(XTest)` individus.
+
+## 4.2 - Création de modèle régression logistique
+
+On va créer le model régression logistique.
+
+```{r}
+reg.log <- glm(is_genuine ~ diagonal+height_left+height_right+margin_low+margin_up+length, data = XTrain, family=binomial)
+summary(reg.log)
+```
+
+## 4.3 - Coefficient de détermination
+
+Dans une régression linéaire typique, nous utilisons R2 comme moyen d'évaluer dans quelle mesure un modèle s'adapte aux données. Ce nombre varie de 0 à 1, les valeurs les plus élevées indiquant un meilleur ajustement du modèle.
+
+Cependant, il n'y a pas une telle valeur R2 pour la régression logistique. Au lieu de cela, nous pouvons calculer une métrique connue sous le nom de R2 de McFadden, qui va de 0 à un peu moins de 1. Des valeurs proches de 0 indiquent que le modèle n'a aucun pouvoir prédictif.À l'inverse, des valeurs proches de 1 indiquent que le modèle a un fort pouvoir prédictif.
+
+```{r}
+library(pscl)
+pR2(reg.log)["McFadden"]
+```
+
+Le coefficient de détermination R2 = `r round(pR2(reg.log)["McFadden"]*100,2)`%.
+
+## 4.4 - Matrice de confusion régression logistique
+
+```{r,message = FALSE}
+library(InformationValue)
+YTest <- XTest$is_genuine
+# Arrondir les résultats de prédiction en nombre entier
+Y_predict <- round(predict(reg.log, XTest, type = "response"),0)
+# Matrice de confusion
+conf_Mat_log = confusionMatrix(YTest, Y_predict)
+conf_Mat_log
+```
+En appliquant la méthode de régression logistique avec les données de test, selon la matrice de confusion, nous avons `r conf_Mat_log[1,2]` vrais billets détectés comme des faux billets, et `r conf_Mat_log[2,1]` faux billets détectés comme des vrais billets.
+
+## 4.5 - Évaluation du modèle avec les données de test
+
+```{r}
+precision(YTest, Y_predict)
+```
+
+Le taux de précision de la prédiction sur les données de test = `r round(precision(YTest, Y_predict),2)`%.
+
+Nous pouvons également calculer la sensibilité (également appelée «taux de vrais positifs») et la spécificité (également appelée «taux de vrais négatifs») ainsi que l'erreur totale de mauvaise classification (qui nous indique le pourcentage de classifications incorrectes totales):
+
+```{r}
+print(paste("Le taux de vrais positifs = ", sensitivity(YTest, Y_predict)*100,"%", sep=""))
+print(paste("Le taux de vrais négatifs = ", round(specificity(YTest, Y_predict)*100,2),"%", sep=""))
+print(paste("L'erreur totale de mauvaise classification = ", misClassError(YTest, Y_predict)*100,"%", sep=""))
+```
+
+## 4.6 - Script de modèle de détection régression logistique
+
+```{r}
+verif_billets_model_reg_log <- function(csv){
+  bills <- read.table(csv, sep = ",", dec = ".", header=TRUE)
+  id_bills = bills$id
+  bills_val = subset(bills[variable])
+  predictions = ifelse(round(predict(reg.log, bills_val, type='response'),0) == 1, "Vrai billet", "Faux billet")
+  for(i in seq_len(nrow(bills))){
+     print(paste("Billet", id_bills[i], "est un", predictions[i]))
+}
+}
+```
+
+On va donc détecter les billets inconnus, on a donc le résultat, les billets 'A_1', 'A_2', 'A_3' sont des faux billets, et les billets 'A_4', 'A_5' sont des vrais.
+
+```{r}
+verif_billets_model_reg_log("Desktop/Openclassrooms/P10_Shibin_YANG/billets_production.csv")
+```
+
+On va essayer encore la méthode KNN pour vérifier si la détection de ce model est correcte.
+
+# 5 - K Nearest Neighbors (K-NN)
+
+## 5.1 - Séparation des données d'entraînement et de test
+
+On va maintenant essayer la méthode K-NN, c’est un algorithme qui peut servir autant pour la classification que pour la régression. Il est surnommé « nearest neighbors » (plus proches voisins, en français) car le principe de ce modèle consiste en effet à choisir les k données les plus proches du point étudié afin d’en prédire sa valeur.
+
+Pour l'appliquer, nous allons séparer le jeu de données en training set et testing set comme précédent. J'ai mis la répartition classique 80/20 entre training et testing set.
+
+```{r}
+set.seed(10)
+trainIndex <- createDataPartition(billets$is_genuine, p = 0.8, list = FALSE, times = 1)
+
+X_Train <- billets[ trainIndex,]
+X_Test  <- billets[-trainIndex,]
+```
+
+```{r}
+nrow(X_Train)
+```
+```{r}
+nrow(X_Test)
+```
+
+## 5.2 - Calcul le nombre optimal de K
+
+```{r}
+library(class)
+for (i in 1:round(sqrt(dim(X_Train)[1]))){
+    model <- knn(train = X_Train[,-1], test = X_Test[,-1], 
+cl = X_Train$is_genuine, k = i)
+    Freq <- table(X_Test[,1], model)
+    print(1-sum(diag(Freq))/sum(Freq))
+}
+```
+
+Le k (nombre de voisins) est l'hyper-paramètre que l’on va chercher à optimiser pour minimiser l’erreur sur les données test. Pour trouver le k optimal, on va simplement tester le modèle pour tous les k, mesurer l’erreur test et afficher la performance en fonction de k.
+Comme on peut le voir, le k-NN le plus performant est celui pour lequel k = 0.006. On connaît donc notre classifieur final optimal : 3-NN. Ce qui veut dire que c'est celui qui classifie le mieux les données.
+
+## 5.3 - Création de modèle 3-NN et la matrice de confusion K-NN
+
+```{r}
+model <- knn(train = X_Train[,-1], test = X_Test[,-1], 
+cl = X_Train$is_genuine, k = 3)
+conf_Mat_knn <- table(X_Test[,1], model)
+conf_Mat_knn
+```
+
+En appliquant la méthode de 3-NN, selon la matrice de confusion, pour les données de test, `r conf_Mat_knn[1,2]`  vrai billet détecté comme de faux billet, et `r conf_Mat_knn[2,1]` faux billets détectés comme des vrais billets.
+
+## 5.4 - Évaluation du modèle avec les données de test
+
+Le taux de prédiction d'un billet sera correcte s'éleve aussi à 99%. On calcul le taux précis de prédiction sur les données de test, qui est égale à peu près 99%.
+
+```{r}
+print(paste("Le taux de prédiction correcte sur les données de test = ", round(sum(diag(Freq))/sum(Freq)*100,2),"%", sep=""))
+```
+
+## 5.5 - Script de modèle de détection K-NN
+
+```{r}
+verif_billets_model_knn <- function(csv){
+  bills <- read.table(csv, sep = ",", dec = ".", header=TRUE)
+  id_bills = bills$id
+  bills_val = subset(bills[variable])
+  predictions = knn(train = X_Train[,-1], test = bills_val[,-7], 
+cl = X_Train$is_genuine, k = 3)
+  for(i in seq_len(nrow(bills))){
+     print(paste("Billet", id_bills[i], "est un vrai billet =", predictions[i]))
+}
+}
+```
+
+On va donc détecter les billets inconnus, on a donc le même résultat, les billets 'A_1', 'A_2', 'A_3' sont des faux billets, et les billets 'A_4', 'A_5' sont des vrais.
+
+```{r}
+verif_billets_model_knn("Desktop/Openclassrooms/P10_Shibin_YANG/billets_production.csv")
+```
+
+
